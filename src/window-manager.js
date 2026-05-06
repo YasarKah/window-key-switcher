@@ -11,8 +11,8 @@ const WINDOW_WAIT_TIMEOUT_MS = 5_000;
 export class WindowManager {
   /** @type {Config} */
   #config;
-  /** @type {number} */
-  #lastHotkeyTimestamp = 0;
+  /** @type {Map<string, number>} */
+  #lastHotkeyTimestamps = new Map();
   /** @type {Map<string, number>} */
   #lastFocusedWindowIds = new Map();
   /** @type {Map<string, number>} */
@@ -63,17 +63,27 @@ export class WindowManager {
   }
 
   /**
+   * Returns whether the current key press is a quick repeated press for this slot.
+   * @param {string} slotId
+   * @returns {boolean}
+   */
+  #isQuickSwitchForSlot(slotId) {
+    const currentTime = Date.now();
+    const quickSwitchTimeout = this.#config.settings.quickSwitchTimeout ?? 2000;
+    const lastHotkeyTimestamp = this.#lastHotkeyTimestamps.get(slotId) ?? 0;
+    const isQuickSwitch = currentTime - lastHotkeyTimestamp < quickSwitchTimeout;
+    this.#lastHotkeyTimestamps.set(slotId, currentTime);
+    return isQuickSwitch;
+  }
+
+  /**
    * Focuses the window associated with the given slot ID.
    * @param {string} slotId
    */
   focus(slotId) {
     logger.log(`Focus window for slot ${slotId}...`);
     const windowsForSlot = this.#getWindowsForSlot(slotId);
-
-    const currentTime = Date.now();
-    const quickSwitchTimeout = this.#config.settings.quickSwitchTimeout ?? 2000;
-    const isQuickSwitch = (currentTime - this.#lastHotkeyTimestamp) < quickSwitchTimeout;
-    this.#lastHotkeyTimestamp = currentTime;
+    const isQuickSwitch = this.#isQuickSwitchForSlot(slotId);
 
     // No windows => do nothing
     if (windowsForSlot.length === 0) {
@@ -87,15 +97,15 @@ export class WindowManager {
       if (this.#isWindowFocused(window)) {
         logger.log(`The only window for slot ${slotId} is already focused`);
         return;
-      } else {
-        this.#focusWindow(window);
-        this.#updateFocusTracking(slotId, window);
-        return;
       }
+
+      this.#focusWindow(window);
+      this.#updateFocusTracking(slotId, window);
+      return;
     }
 
     // Multiple windows case
-    const currentFocusedWindow = windowsForSlot.find(w => this.#isWindowFocused(w));
+    const currentFocusedWindow = windowsForSlot.find((window) => this.#isWindowFocused(window));
 
     if (currentFocusedWindow) {
       // A window from this slot is currently focused
@@ -112,7 +122,7 @@ export class WindowManager {
         // Slow switch: focus the last focused window that isn't current
         const lastFocusedWindowId = this.#lastFocusedWindowIds.get(slotId);
         if (lastFocusedWindowId && lastFocusedWindowId !== currentFocusedWindow.get_id()) {
-          nextWindow = windowsForSlot.find((w) => w.get_id() === lastFocusedWindowId);
+          nextWindow = windowsForSlot.find((window) => window.get_id() === lastFocusedWindowId);
         }
 
         // If no valid last focused, or it doesn't exist anymore, cycle to next
@@ -125,16 +135,20 @@ export class WindowManager {
         logger.log(`Slow switch: focusing last/next window`);
       }
 
-      // Save current as last focused before switching
-      this.#lastFocusedWindowIds.set(slotId, currentFocusedWindow.get_id());
+      // Save current as last focused before switching so delayed presses can return to it.
+      this.#updateFocusTracking(slotId, currentFocusedWindow);
       this.#focusWindow(nextWindow);
-      this.#updateFocusTracking(slotId, nextWindow);
     } else {
-      // No window from this slot is focused, focus the first one
-      const firstWindow = windowsForSlot[0];
-      this.#focusWindow(firstWindow);
-      this.#updateFocusTracking(slotId, firstWindow);
-      this.#currentCycleIndex.set(slotId, 0);
+      // No window from this slot is focused, focus the last known window if it still exists.
+      const lastFocusedWindowId = this.#lastFocusedWindowIds.get(slotId);
+      const lastFocusedWindow = lastFocusedWindowId
+        ? windowsForSlot.find((window) => window.get_id() === lastFocusedWindowId)
+        : null;
+      const windowToFocus = lastFocusedWindow ?? windowsForSlot[0];
+
+      this.#focusWindow(windowToFocus);
+      this.#updateFocusTracking(slotId, windowToFocus);
+      this.#currentCycleIndex.set(slotId, windowsForSlot.indexOf(windowToFocus));
     }
   }
 
@@ -239,10 +253,12 @@ export class WindowManager {
    * @param {Meta.Window} window
    */
   #updateFocusTracking(slotId, window) {
-    // Don't update last focused if it's the same window
     const currentLastFocusedWindowId = this.#lastFocusedWindowIds.get(slotId);
-    if (currentLastFocusedWindowId !== window.get_id()) {
-      logger.log(`Updating focus tracking for slot ${slotId}: window ${window.get_id()}`);
+    const nextLastFocusedWindowId = window.get_id();
+
+    if (currentLastFocusedWindowId !== nextLastFocusedWindowId) {
+      logger.log(`Updating focus tracking for slot ${slotId}: window ${nextLastFocusedWindowId}`);
+      this.#lastFocusedWindowIds.set(slotId, nextLastFocusedWindowId);
     }
   }
 
